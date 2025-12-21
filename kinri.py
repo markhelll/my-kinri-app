@@ -1,143 +1,154 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import sqlite3
-from datetime import datetime, timedelta
-import numpy as np
+import altair as alt
 
-# --- 1. データベース設定 ---
-DB_NAME = 'lending_rates.db'
+# ==========================================
+# 👇 スプレッドシートのURL（ここは変えないでOK！）
+CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vS8hJRst-sZ2V_rzHW77OK5NBbDGRwJ8O7bYNoofq2l7gtqE8ZzPSUq39xPI4IDp4-q1NXdapzo-hZE/pub?output=csv"
+# ==========================================
 
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS rates
-                 (date TEXT, bank_name TEXT, rate REAL, UNIQUE(date, bank_name))''')
-    conn.commit()
-    conn.close()
+st.set_page_config(page_title="My金利ウォッチ", page_icon="🏦", layout="wide")
 
-# --- 2. 過去1年分のデータを生成（初回のみ） ---
-def seed_initial_data():
-    conn = sqlite3.connect(DB_NAME)
-    df_check = pd.read_sql_query("SELECT count(*) as count FROM rates", conn)
+# --- サイドバー：設定エリア ---
+st.sidebar.header("⚙️ 設定")
+
+if st.sidebar.button("🔄 データを強制更新"):
+    st.cache_data.clear()
+    st.rerun()
+
+st.sidebar.divider()
+
+# ★新機能：リアル金利シミュレーター
+st.sidebar.subheader("💰 My金利シミュレーション")
+st.sidebar.caption("あなたの契約内容を入力してください")
+
+# 1. 銀行を選ぶ
+my_bank = st.sidebar.selectbox(
+    "借りている銀行",
+    ["三菱UFJ", "横浜銀行", "城北信用金庫"],
+    index=0
+)
+
+# 2. 優遇幅を入力する (例: 1.85%)
+discount_rate = st.sidebar.number_input(
+    "優遇幅 (マイナス分 %)",
+    min_value=0.0,
+    max_value=3.0,
+    value=1.85,
+    step=0.01,
+    format="%.2f"
+)
+
+st.sidebar.info(f"あなたの適用金利 = 店頭金利 - {discount_rate}%")
+
+# --- メイン画面 ---
+st.title("🏦 My金利ウォッチ (Pro)")
+
+@st.cache_data(ttl=600)
+def load_data():
+    try:
+        df = pd.read_csv(CSV_URL)
+        if df.empty: return None
+        df['Date'] = pd.to_datetime(df['Date'])
+        return df
+    except Exception:
+        return None
+
+df = load_data()
+
+if df is None or df.empty:
+    st.error("⚠️ データが読み込めませんでした。")
+else:
+    df_sorted = df.sort_values('Date')
+    latest = df_sorted.iloc[-1]
     
-    if df_check['count'][0] == 0:
-        st.info("初回起動：過去1年分の借入金利データを生成中...")
-        start_date = datetime.now() - timedelta(days=365)
-        
-        banks = {
-            "日銀(基準)": 1.475,
-            "三菱UFJ(変動)": 0.345,
-            "横浜銀行(変動)": 0.425,
-            "城北信用金庫(変動)": 0.625
-        }
-        
-        initial_records = []
-        for i in range(366):
-            current_date = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
-            for bank, base_rate in banks.items():
-                noise = np.random.normal(0, 0.002)
-                trend = (i * 0.0001) if "日銀" not in bank else 0
-                rate = max(0.1, base_rate + trend + noise)
-                initial_records.append((current_date, bank, round(rate, 3)))
-        
-        c = conn.cursor()
-        c.executemany("INSERT OR IGNORE INTO rates VALUES (?,?,?)", initial_records)
-        conn.commit()
-    conn.close()
-
-# --- 3. 最新金利取得（ダミー） ---
-def fetch_latest_rates():
-    today = datetime.now().strftime('%Y-%m-%d')
-    results = [
-        (today, "日銀(基準)", 1.475),
-        (today, "三菱UFJ(変動)", 0.450),
-        (today, "横浜銀行(変動)", 0.435),
-        (today, "城北信用金庫(変動)", 0.630)
-    ]
-    return results
-
-# --- 4. メインアプリ ---
-def main():
-    st.set_page_config(page_title="金利チャート（1年）", layout="wide")
-    st.title("💸 銀行借入金利 推移チャート")
+    # マッピング用辞書 (CSVの列名 -> 表示名)
+    bank_map = {
+        "三菱UFJ": "MUFG",
+        "横浜銀行": "Yokohama",
+        "城北信用金庫": "Johoku"
+    }
+    target_col = bank_map[my_bank]
     
-    init_db()
-    seed_initial_data()
+    # ★My金利の計算
+    current_store_rate = latest[target_col]
+    my_real_rate = max(0, current_store_rate - discount_rate)
 
-    # --- サイドバー ---
-    with st.sidebar:
-        st.header("設定")
-        
-        if st.button("最新レートを取得"):
-            new_data = fetch_latest_rates()
-            conn = sqlite3.connect(DB_NAME)
-            c = conn.cursor()
-            c.executemany("INSERT OR IGNORE INTO rates VALUES (?,?,?)", new_data)
-            conn.commit()
-            conn.close()
-            st.success("データを更新しました")
-            
-        st.divider()
-        # 【変更点】最小値を7、デフォルト値を7に変更しました
-        view_days = st.slider("表示期間（過去何日分）", 7, 365, 7)
-        
-        st.divider()
-        time_unit = st.radio("表示単位", ["日足", "週足", "月足", "年足"])
-        st.caption("※チャート上をダブルクリックでリセット、左クリックドラッグで拡大できます。")
-
-    # データ読み込み
-    conn = sqlite3.connect(DB_NAME)
-    cutoff = (datetime.now() - timedelta(days=view_days)).strftime('%Y-%m-%d')
-    query = f"SELECT * FROM rates WHERE date >= '{cutoff}' ORDER BY date ASC"
-    df = pd.read_sql_query(query, conn)
-    conn.close()
+    # --- 1. 最新ステータス (My金利を強調！) ---
+    st.markdown(f"### 📊 現在の金利状況 ({latest['Date'].strftime('%Y/%m/%d')} 時点)")
     
-    df['date'] = pd.to_datetime(df['date'])
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # My金利を一番左にドーンと表示
+    col1.metric("🏠 あなたの支払金利", f"{my_real_rate:.3f}%", help=f"{my_bank}店頭 {current_store_rate}% - 優遇 {discount_rate}%")
+    
+    col2.metric("日銀政策金利", f"{latest['BOJ']}%")
+    col3.metric(f"{my_bank} (店頭)", f"{current_store_rate}%")
+    col4.metric("他行平均 (参考)", f"{(latest['MUFG']+latest['Yokohama'])/2:.2f}%")
 
-    # --- 時間軸の切り替え ---
-    if time_unit == "週足":
-        df = df.groupby('bank_name').resample('W', on='date').mean().reset_index()
-    elif time_unit == "月足":
-        df = df.groupby('bank_name').resample('M', on='date').mean().reset_index()
-    elif time_unit == "年足":
-        df = df.groupby('bank_name').resample('Y', on='date').mean().reset_index()
+    st.divider()
 
-    # --- チャート描画 ---
-    if not df.empty:
-        fig = px.line(df, x="date", y="rate", color="bank_name",
-                      title=f"借入金利の推移（過去{view_days}日・{time_unit}）",
-                      labels={"rate": "金利 (%)", "date": "日付", "bank_name": "金融機関"},
-                      template="plotly_dark")
+    # --- 2. チャート ---
+    st.sidebar.divider()
+    st.sidebar.header("📈 チャート設定")
+    timeframe = st.sidebar.radio("期間（足）", ["分足", "日足", "週足", "年足"], index=1)
 
-        fig.update_layout(
-            hovermode='x unified',
-            yaxis=dict(title="金利 (%)"),
-            xaxis=dict(
-                rangeselector=dict(
-                    buttons=list([
-                        dict(count=7, label="1週間", step="day", stepmode="backward"), # 7日ボタンを追加
-                        dict(count=1, label="1ヶ月", step="month", stepmode="backward"),
-                        dict(count=3, label="3ヶ月", step="month", stepmode="backward"),
-                        dict(step="all", label="全期間")
-                    ])
-                ),
-                rangeslider=dict(visible=True),
-                type="date"
-            )
-        )
-        
-        fig.update_traces(line=dict(width=3))
-        st.plotly_chart(fig, use_container_width=True)
-
-        # 最新値テーブル
-        st.subheader("現在の金利一覧")
-        latest_df = df.sort_values('date').groupby('bank_name').tail(1)[['bank_name', 'rate']]
-        latest_df = latest_df.set_index('bank_name')
-        st.table(latest_df.style.format("{:.3f}%"))
-            
+    # データの加工
+    df_indexed = df_sorted.set_index('Date')
+    
+    # My金利列を追加計算！
+    # 全行に対して「その銀行の店頭金利 - 優遇幅」を計算
+    df_chart_source = df_indexed.copy()
+    if "週足" in timeframe:
+        df_display = df_chart_source.resample('W').last().reset_index()
+    elif "年足" in timeframe:
+        df_display = df_chart_source.resample('A').last().reset_index()
+    elif "分足" in timeframe:
+        df_display = df_sorted.copy()
     else:
-        st.error("データがありません。")
+        df_display = df_chart_source.resample('D').last().dropna().reset_index()
 
-if __name__ == "__main__":
-    main()
+    # チャート用のデータ作成
+    # 1. まず既存の銀行データを縦持ちに変換
+    chart_data = df_display.melt('Date', var_name='Bank', value_name='Rate')
+    
+    # 2. My金利のデータを計算して追加
+    # 選ばれた銀行のデータだけ抜き出して計算
+    my_rate_data = df_display[['Date', target_col]].copy()
+    my_rate_data['Rate'] = my_rate_data[target_col] - discount_rate
+    my_rate_data['Rate'] = my_rate_data['Rate'].apply(lambda x: max(0, x)) # 0%未満にはしない
+    my_rate_data['Bank'] = "★My金利" # 特別な名前をつける
+    
+    # 結合 (通常の銀行データ + My金利データ)
+    final_chart_data = pd.concat([chart_data, my_rate_data[['Date', 'Bank', 'Rate']]])
+
+    st.subheader(f"📈 金利推移チャート (My金利付き)")
+    
+    # チャート描画
+    # My金利だけ太く赤くする設定
+    base = alt.Chart(final_chart_data).encode(
+        x=alt.X('Date:T', title='日付'),
+        y=alt.Y('Rate:Q', title='金利 (%)'),
+        tooltip=['Date', 'Bank', 'Rate']
+    )
+
+    # 通常の線
+    lines = base.mark_line(interpolate='step-after', point=True).encode(
+        color=alt.Color('Bank:N', title='凡例'),
+        strokeDash=alt.condition(
+            alt.datum.Bank == '★My金利',
+            alt.value([0]),  # 実線
+            alt.value([4, 2]) # 他は点線っぽくして区別
+        ),
+        strokeWidth=alt.condition(
+            alt.datum.Bank == '★My金利',
+            alt.value(4),    # My金利は太く
+            alt.value(1.5)   # 他は細く
+        )
+    ).interactive()
+
+    st.altair_chart(lines, use_container_width=True)
+    
+    # --- 3. 履歴リスト ---
+    with st.expander("詳細データを見る"):
+        st.dataframe(df_sorted.set_index('Date').sort_index(ascending=False))
